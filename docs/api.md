@@ -143,7 +143,7 @@ the approval fields (`approvalId`, `activityId`, `status`, `message`). Request b
 | `RAW_TRANSACTION_REJECTED` | 400 | Raw transaction payloads are not accepted. |
 | `IDEMPOTENCY_KEY_INVALID` | 400 | The Idempotency-Key header is too long. |
 | `IDEMPOTENCY_CONFLICT` | 409 | The Idempotency-Key was already used with a different intent. |
-| `AGENT_NOT_ACTIVE` | 409 | The agent is paused or disabled. |
+| `AGENT_NOT_ACTIVE` | 409 | The agent is `paused` or `disabled`. Returned by `POST /agents/:id/intents` and `POST /approvals/:id/approve`. |
 | `AGENT_STATUS_CONFLICT` | 409 | The agent's current status does not allow the requested status transition. |
 | `INVALID_EXECUTION_STATE` | 409 | The execution status does not allow the requested action. |
 | `MAX_RETRIES_REACHED` | 409 | The execution has used all retry attempts. |
@@ -175,7 +175,13 @@ the Bearer integration surface. The document lists them under
 
 ### GET /health
 
-Public (no authentication). Returns `{"status":"ok","signerAccountId":"G..."}`.
+Public (no authentication). Returns `{"status":"ok","signerAccountId":"G...","version":"0.3.0","schemaVersion":5}`:
+
+- `status`: `"ok"`.
+- `signerAccountId`: configured Stellar signer public key.
+- `version`: running API package version (from `apps/api/package.json`).
+- `schemaVersion`: live SQLite `_meta.schema_version` integer for file-backed databases, or `null` when running in-memory.
+
 This liveness response stays unconditional and performs no dependency checks.
 
 ### GET /health/ready
@@ -269,6 +275,13 @@ Body: `{ "status": "active" | "paused" | "disabled" }`
   `{ "code": "AGENT_STATUS_CONFLICT", "error": "invalid status transition", "currentStatus": "disabled", "requestedStatus": "active" }`.
   A `disabled` agent cannot transition back to `active`.
 
+Effect on agent work when `paused` or `disabled`:
+
+- **New intents & schedules**: `POST /agents/:id/intents` rejects with `409 AGENT_NOT_ACTIVE`, and the scheduler skips non-active agents.
+- **Pending approvals**: `POST /approvals/:id/approve` rejects with `409 AGENT_NOT_ACTIVE` without enqueueing execution. For a `paused` agent, approvals remain `pending_approval` and can still be approved if the agent is resumed to `active` before the approval's TTL expires. `disabled` is terminal — the agent cannot resume, so pending approvals can never be approved (they remain `pending_approval` until TTL expiry or explicit rejection).
+- **Queued executions & retries**: already-approved queued executions (including retries) are permanently rejected before signing/submission when picked up by the queue or `executeApproved()`, marking the approval and activity `failed` and releasing any daily spending reservation.
+- **In-flight executions**: executions already past the signing step and actively submitting to Horizon are intentionally not aborted mid-flight so Stellar account sequence numbers are not corrupted by half-aborted submissions.
+
 ---
 
 ## Intents
@@ -292,11 +305,13 @@ Agent status admission: the agent must be `active`. A `paused` or
 `disabled` agent rejects new intents before any activity, approval,
 execution, or queue record is created:
 
-- `409` → `{ "error": "agent is paused; new intents are rejected" }`
-- `409` → `{ "error": "agent is disabled; new intents are rejected" }`
+- `409` → `{ "code": "AGENT_NOT_ACTIVE", "error": "agent is paused; new intents are rejected" }`
+- `409` → `{ "code": "AGENT_NOT_ACTIVE", "error": "agent is disabled; new intents are rejected" }`
 
-Existing approvals and in-flight executions are unaffected by a status
-change — the gate applies to new intents only.
+Pending approvals and queued executions are also gated by agent status
+(see `POST /approvals/:id/approve` and `PATCH /agents/:id/status`);
+in-flight executions already past signing are intentionally not aborted
+to protect Stellar account sequence numbers.
 
 Behavior (policy decision):
 
@@ -324,12 +339,31 @@ identity is taken from the authenticated principal's `subject`.
 
 - `200` → `{ approvalId, activityId, agentId:"", status:"approved",
   message }` — execution is enqueued (persistent queue) or deferred
+- `409` → `AGENT_NOT_ACTIVE` when the approval's agent is `paused` or
+  `disabled` (`error` / `message`: `"agent is paused; cannot approve intent"`
+  or `"agent is disabled; cannot approve intent"`). No execution is enqueued.
 - `409` → `APPROVAL_INVALID_STATE` (e.g. already approved)
 - `410` → `APPROVAL_EXPIRED`
-- `404` → `APPROVAL_NOT_FOUND` (not found or not owned)
+- `404` → `APPROVAL_NOT_FOUND` (not found or not owned) or `AGENT_NOT_FOUND`
 
 Each error body carries `code` and `error` plus the approval-response fields
 (`approvalId`, `activityId`, `status`, `message`).
+
+Agent status & resume semantics:
+
+- **`paused`**: the approval remains in `pending_approval` until its TTL
+  expires. If the operator resumes the agent back to `active` before expiry,
+  the approval can be approved normally.
+- **`disabled`**: terminal state — the agent cannot transition back to
+  `active`. Pending approvals remain in `pending_approval` until TTL expiry
+  (or explicit rejection) and can never be approved.
+- **Queued & in-flight executions**: if an agent is paused or disabled after
+  approval (or before a retry runs), the execution queue and
+  `executeApproved()` permanently reject the execution before signing or
+  submitting to Horizon, marking the approval and activity `failed` and
+  releasing daily spending reservations. In-flight executions already past
+  the signing step are intentionally not aborted mid-flight to protect
+  Stellar account sequence numbers.
 
 Raw XDR in body → `400` `RAW_TRANSACTION_REJECTED`.
 
@@ -485,6 +519,12 @@ Single schedule (owner-scoped). Returns `{ "schedule": ScheduleRecord }`.
 Update a schedule's `scheduleExpression` (re-validated against the
 schedule's timezone). `200` → `{ "schedule" }`.
 
+**Accepted fields:** `scheduleExpression` only. Any other fields — including
+unknown keys and plausible-but-wrong names such as `cronExpression` — cause a
+`400 VALIDATION_ERROR` naming `scheduleExpression` as the accepted field. An
+empty body `{}` is also rejected with `400 VALIDATION_ERROR`. This prevents
+silent no-ops: a `200` response always means the schedule changed.
+
 ### DELETE /agents/:id/schedules/:scheduleId
 
 Delete a schedule. `200` → `{ "deleted": true }`.
@@ -543,7 +583,10 @@ Single execution (owner-scoped via `getForOwner`). Returns
 ### POST /executions/:id/retry
 
 Retry a `failed` or `dead_letter` execution. Requires the execution
-queue to be enabled. Cancelled executions cannot be retried.
+queue to be enabled. Cancelled executions cannot be retried. If the
+execution's agent is `paused` or `disabled` when the queue dispatches
+the retry, it is permanently rejected before signing or submitting to
+Horizon.
 
 - `200` → `{ "execution", "message": "execution queued for retry" }`
 - `409` → wrong status (e.g. attempting to retry a `cancelled` execution) / max retries reached / state conflict

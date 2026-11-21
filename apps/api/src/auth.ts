@@ -30,9 +30,10 @@
  */
 
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual, createHash } from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import { jwtVerify, createRemoteJWKSet } from "jose";
+import { getSharedConnection } from "@4evergent/database";
 import type { AuthProvider, AuthenticatedPrincipal } from "@4evergent/shared";
 import { SlidingWindowRateLimiter, clientKey } from "./rate-limit.js";
 
@@ -107,7 +108,7 @@ class UserStore {
 
   constructor(dbPath?: string) {
     if (dbPath) {
-      this.db = new DatabaseSync(dbPath);
+      this.db = getSharedConnection(dbPath);
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS auth_users (
           id TEXT PRIMARY KEY,
@@ -192,7 +193,7 @@ class SessionStore {
 
   constructor(dbPath?: string) {
     if (dbPath) {
-      this.db = new DatabaseSync(dbPath);
+      this.db = getSharedConnection(dbPath);
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS auth_sessions (
           token TEXT PRIMARY KEY,

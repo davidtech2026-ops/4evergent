@@ -25,9 +25,15 @@ export function ScheduleManagement({ agentId, onError }: ScheduleManagementProps
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Track which schedule is being edited and its draft expression
+  // Track which schedule is being edited and its draft fields
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editAsset, setEditAsset] = useState<string>('XLM');
+  const [editIssuer, setEditIssuer] = useState<string>('');
+  const [editAmount, setEditAmount] = useState<string>('');
+  const [editDestination, setEditDestination] = useState<string>('');
+  const [editReason, setEditReason] = useState<string>('');
   const [editExpression, setEditExpression] = useState<string>('');
+  const [editTimezone, setEditTimezone] = useState<string>('UTC');
   const [editError, setEditError] = useState<string | null>(null);
   const [editSaving, setEditSaving] = useState(false);
 
@@ -64,39 +70,93 @@ export function ScheduleManagement({ agentId, onError }: ScheduleManagementProps
   };
 
   const startEdit = (schedule: ScheduleRecord) => {
+    const intentWithDetails = schedule.intent as typeof schedule.intent & { assetDetails?: { issuer?: string } };
     setEditingId(schedule.id);
+    setEditAsset(schedule.intent.asset ?? 'XLM');
+    setEditIssuer(intentWithDetails.assetDetails?.issuer ?? '');
+    setEditAmount(schedule.intent.amount ?? '');
+    setEditDestination(schedule.intent.destination ?? '');
+    setEditReason(schedule.intent.reason ?? '');
     setEditExpression(schedule.scheduleExpression ?? '');
+    setEditTimezone(schedule.timezone ?? 'UTC');
     setEditError(null);
   };
 
   const cancelEdit = () => {
     setEditingId(null);
+    setEditAsset('XLM');
+    setEditIssuer('');
+    setEditAmount('');
+    setEditDestination('');
+    setEditReason('');
     setEditExpression('');
+    setEditTimezone('UTC');
     setEditError(null);
   };
 
-  const saveEdit = async (scheduleId: string) => {
+  const saveEdit = async (schedule: ScheduleRecord) => {
     if (!editingId || editSaving) return;
-    const trimmed = editExpression.trim();
-    if (!trimmed) {
+    const trimmedExpr = editExpression.trim();
+    if (!trimmedExpr) {
       setEditError('Schedule expression is required.');
       return;
     }
+
+    const patch: {
+      scheduleExpression?: string;
+      timezone?: string;
+      intent?: Partial<SubmitPaymentIntent>;
+    } = {};
+
+    if (trimmedExpr !== schedule.scheduleExpression) {
+      patch.scheduleExpression = trimmedExpr;
+    }
+    if (editTimezone !== schedule.timezone) {
+      patch.timezone = editTimezone;
+    }
+
+    const trimmedAmount = editAmount.trim();
+    const trimmedDestination = editDestination.trim();
+    const trimmedReason = editReason.trim();
+    const trimmedIssuer = editIssuer.trim();
+    const origIssuer = (schedule.intent as typeof schedule.intent & { assetDetails?: { issuer?: string } }).assetDetails?.issuer ?? '';
+
+    const intentChanged =
+      editAsset !== schedule.intent.asset ||
+      (editAsset !== 'XLM' && trimmedIssuer !== origIssuer) ||
+      trimmedAmount !== (schedule.intent.amount ?? '') ||
+      trimmedDestination !== (schedule.intent.destination ?? '') ||
+      trimmedReason !== (schedule.intent.reason ?? '');
+
+    if (intentChanged) {
+      patch.intent = {
+        type: 'payment',
+        asset: editAsset,
+        ...(editAsset !== 'XLM' ? { assetDetails: { code: editAsset, issuer: trimmedIssuer } } : {}),
+        amount: trimmedAmount,
+        destination: trimmedDestination,
+        reason: trimmedReason,
+      };
+    }
+
+    if (Object.keys(patch).length === 0) {
+      cancelEdit();
+      return;
+    }
+
     setEditSaving(true);
     setEditError(null);
     try {
-      const result = await api.updateSchedule(agentId, scheduleId, {
-        scheduleExpression: trimmed,
-      });
+      const result = await api.updateSchedule(agentId, schedule.id, patch);
       // Update the local schedule list with the server response
       setSchedules((prev) =>
         prev
-          ? prev.map((s) => (s.id === scheduleId ? result.schedule : s))
+          ? prev.map((s) => (s.id === schedule.id ? result.schedule : s))
           : prev
       );
       cancelEdit();
     } catch (e: any) {
-      setEditError(e.message ?? 'Failed to update schedule expression.');
+      setEditError(e.message ?? 'Failed to update schedule.');
     } finally {
       setEditSaving(false);
     }
@@ -154,9 +214,85 @@ export function ScheduleManagement({ agentId, onError }: ScheduleManagementProps
                       className="schedule-edit-form"
                       onSubmit={async (e) => {
                         e.preventDefault();
-                        await saveEdit(s.id);
+                        await saveEdit(s);
                       }}
                     >
+                      <div className="form-grid">
+                        <label>
+                          <span>Asset</span>
+                          <select
+                            value={editAsset}
+                            onChange={(e) => setEditAsset(e.target.value)}
+                            disabled={editSaving}
+                            aria-label="Edit asset"
+                          >
+                            <option value="XLM">XLM (native)</option>
+                            <option value="USDC">USDC</option>
+                            <option value="BTC">BTC</option>
+                          </select>
+                        </label>
+                        {editAsset !== 'XLM' && (
+                          <label>
+                            <span>Asset Issuer (G...)</span>
+                            <input
+                              type="text"
+                              value={editIssuer}
+                              onChange={(e) => setEditIssuer(e.target.value)}
+                              placeholder="G... (asset issuer)"
+                              disabled={editSaving}
+                              aria-label="Edit asset issuer"
+                            />
+                          </label>
+                        )}
+                        <label>
+                          <span>Amount</span>
+                          <input
+                            type="number"
+                            step="0.0000001"
+                            min="0"
+                            value={editAmount}
+                            onChange={(e) => setEditAmount(e.target.value)}
+                            placeholder="10"
+                            disabled={editSaving}
+                            aria-label="Edit amount"
+                          />
+                        </label>
+                        <label>
+                          <span>Destination (G...)</span>
+                          <input
+                            type="text"
+                            value={editDestination}
+                            onChange={(e) => setEditDestination(e.target.value)}
+                            placeholder="G..."
+                            disabled={editSaving}
+                            aria-label="Edit destination"
+                          />
+                        </label>
+                        <label>
+                          <span>Reason</span>
+                          <input
+                            type="text"
+                            value={editReason}
+                            onChange={(e) => setEditReason(e.target.value)}
+                            placeholder="Recurring payment"
+                            disabled={editSaving}
+                            aria-label="Edit reason"
+                          />
+                        </label>
+                        <label>
+                          <span>Timezone</span>
+                          <select
+                            value={editTimezone}
+                            onChange={(e) => setEditTimezone(e.target.value)}
+                            disabled={editSaving}
+                            aria-label="Edit timezone"
+                          >
+                            {SUPPORTED_TIMEZONES.map((tz) => (
+                              <option key={tz} value={tz}>{tz}</option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
                       <label>
                         <span>Cron expression</span>
                         <input

@@ -244,6 +244,108 @@ test("classifyPipelineOutcome: simulation_failed without network is permanent", 
   assert.equal(classifyPipelineOutcome(outcome), "permanent");
 });
 
+test("ExecutionQueue executor: rejected outcome with transient message is transient and retried", async () => {
+  const store = new InMemoryExecutionStore();
+  const outcome = { status: "rejected", message: "Submission failed: network timeout" };
+  const pipelineExecutor = async (record: ExecutionRecord): Promise<ExecutionResult> => ({
+    record,
+    success: outcome.status === "submitted",
+    status: outcome.status,
+    error: outcome.message,
+    errorClass: classifyPipelineOutcome(outcome),
+  });
+  const queue = new ExecutionQueue(store, pipelineExecutor, async () => ({
+    accountId: () => "GACCOUNT",
+    sequenceNumber: () => "1",
+    incrementSequenceNumber: () => {},
+  }), { retryPolicy: { maxRetries: 3, baseDelayMs: 10, maxDelayMs: 50 } });
+
+  const execution = makeExecution();
+  await queue.enqueue(execution);
+  await queue.processDue();
+
+  const updated = await store.get(execution.id);
+  assert.equal(updated?.status, "failed");
+  assert.equal(updated?.errorClass, "transient");
+  assert.equal(updated?.attempt, 1);
+  assert.ok(updated?.nextRetryAt);
+});
+
+test("ExecutionQueue executor: rejected outcome with permanent message is permanent and not retried", async () => {
+  const store = new InMemoryExecutionStore();
+  const outcome = { status: "rejected", message: "Policy denied: spending limit exceeded" };
+  const pipelineExecutor = async (record: ExecutionRecord): Promise<ExecutionResult> => ({
+    record,
+    success: outcome.status === "submitted",
+    status: outcome.status,
+    error: outcome.message,
+    errorClass: classifyPipelineOutcome(outcome),
+  });
+  const queue = new ExecutionQueue(store, pipelineExecutor, async () => ({
+    accountId: () => "GACCOUNT",
+    sequenceNumber: () => "1",
+    incrementSequenceNumber: () => {},
+  }), { retryPolicy: { maxRetries: 3, baseDelayMs: 10, maxDelayMs: 50 } });
+
+  const execution = makeExecution();
+  await queue.enqueue(execution);
+  await queue.processDue();
+
+  const updated = await store.get(execution.id);
+  assert.equal(updated?.status, "dead_letter");
+  assert.equal(updated?.errorClass, "permanent");
+  assert.equal(updated?.attempt, 1);
+  assert.equal(updated?.nextRetryAt, null);
+});
+
+test("ExecutionQueue executor: simulation_failed outcome with deterministic message is permanent and not retried", async () => {
+  const store = new InMemoryExecutionStore();
+  const outcome = { status: "simulation_failed", message: "bad sequence" };
+  const pipelineExecutor = async (record: ExecutionRecord): Promise<ExecutionResult> => ({
+    record,
+    success: outcome.status === "submitted",
+    status: outcome.status,
+    error: outcome.message,
+    errorClass: classifyPipelineOutcome(outcome),
+  });
+  const queue = new ExecutionQueue(store, pipelineExecutor, async () => ({
+    accountId: () => "GACCOUNT",
+    sequenceNumber: () => "1",
+    incrementSequenceNumber: () => {},
+  }), { retryPolicy: { maxRetries: 3, baseDelayMs: 10, maxDelayMs: 50 } });
+
+  const execution = makeExecution();
+  await queue.enqueue(execution);
+  await queue.processDue();
+
+  const updated = await store.get(execution.id);
+  assert.equal(updated?.status, "dead_letter");
+  assert.equal(updated?.errorClass, "permanent");
+  assert.equal(updated?.attempt, 1);
+  assert.equal(updated?.nextRetryAt, null);
+});
+
+test("ExecutionQueue: uncaught error in executor uses shared classifyError", async () => {
+  const store = new InMemoryExecutionStore();
+  const pipelineExecutor = async (): Promise<ExecutionResult> => {
+    throw new Error("network timeout");
+  };
+  const queue = new ExecutionQueue(store, pipelineExecutor, async () => ({
+    accountId: () => "GACCOUNT",
+    sequenceNumber: () => "1",
+    incrementSequenceNumber: () => {},
+  }), { retryPolicy: { maxRetries: 3, baseDelayMs: 10, maxDelayMs: 50 } });
+
+  const execution = makeExecution();
+  await queue.enqueue(execution);
+  await queue.processDue();
+
+  const updated = await store.get(execution.id);
+  assert.equal(updated?.status, "failed");
+  assert.equal(updated?.errorClass, "transient");
+  assert.ok(updated?.nextRetryAt);
+});
+
 test("shouldRetry: permanent never retries", () => {
   assert.equal(shouldRetry(0, "permanent"), false);
   assert.equal(shouldRetry(1, "permanent"), false);

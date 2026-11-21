@@ -81,6 +81,12 @@ export interface ApprovalStore {
    * conditional UPDATE ... WHERE status = ? statement.
    */
   updateIfStatus(id: string, expectedStatus: ApprovalStatus, patch: Partial<ApprovalRecord>): Promise<ApprovalRecord | null>;
+  /**
+   * Transition pending approvals past their expiresAt to 'expired'.
+   * Bounded by `limit`. Calls `onSwept` for each transitioned record.
+   * Returns the count of transitioned records.
+   */
+  sweepExpired(now?: string, limit?: number, onSwept?: (record: ApprovalRecord) => void | Promise<void>): Promise<number>;
 }
 
 export type ApprovalStatus =
@@ -278,6 +284,27 @@ export class InMemoryActivityStore implements ActivityStore {
   }
 }
 
+function isApprovalRecordExpired(r: ApprovalRecord, now: string): boolean {
+  return r.status === "pending_approval" && r.expiresAt !== null && r.expiresAt <= now;
+}
+
+function resolveApprovalRecordStatus(r: ApprovalRecord, now = new Date().toISOString()): ApprovalRecord {
+  if (isApprovalRecordExpired(r, now)) {
+    return {
+      ...r,
+      status: "expired",
+      expiredAt: r.expiredAt ?? r.expiresAt,
+    };
+  }
+  return r;
+}
+
+function matchesApprovalStatus(r: ApprovalRecord, status: string | undefined, now: string): boolean {
+  if (status === undefined) return true;
+  const effective = isApprovalRecordExpired(r, now) ? "expired" : r.status;
+  return effective === status;
+}
+
 /**
  * InMemoryApprovalStore — process-local approval log.
  *
@@ -291,51 +318,62 @@ export class InMemoryApprovalStore implements ApprovalStore {
   }
 
   async get(id: string): Promise<ApprovalRecord | null> {
-    return this.records.get(id) ?? null;
+    const rec = this.records.get(id);
+    return rec ? resolveApprovalRecordStatus(rec) : null;
   }
 
   async listByAgent(agentId: string, limit = 50, offset = 0, status?: string): Promise<ApprovalRecord[]> {
     const safeOffset = clampOffset(offset);
+    const now = new Date().toISOString();
     return [...this.records.values()]
-      .filter((r) => r.agentId === agentId && (status === undefined || r.status === status))
+      .filter((r) => r.agentId === agentId && matchesApprovalStatus(r, status, now))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(safeOffset, safeOffset + clampLimit(limit));
+      .slice(safeOffset, safeOffset + clampLimit(limit))
+      .map((r) => resolveApprovalRecordStatus(r, now));
   }
 
   async listByStatus(agentId: string, status: string, limit = 50, offset = 0): Promise<ApprovalRecord[]> {
     const safeOffset = clampOffset(offset);
+    const now = new Date().toISOString();
     return [...this.records.values()]
-      .filter((r) => r.agentId === agentId && r.status === status)
+      .filter((r) => r.agentId === agentId && matchesApprovalStatus(r, status, now))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(safeOffset, safeOffset + clampLimit(limit));
+      .slice(safeOffset, safeOffset + clampLimit(limit))
+      .map((r) => resolveApprovalRecordStatus(r, now));
   }
 
   async listAll(limit = 50, offset = 0): Promise<ApprovalRecord[]> {
     const safeOffset = clampOffset(offset);
+    const now = new Date().toISOString();
     return [...this.records.values()]
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(safeOffset, safeOffset + clampLimit(limit));
+      .slice(safeOffset, safeOffset + clampLimit(limit))
+      .map((r) => resolveApprovalRecordStatus(r, now));
   }
 
   async listByOwner(ownerId: string, limit = 50, offset = 0, status?: string): Promise<ApprovalRecord[]> {
     const safeOffset = clampOffset(offset);
+    const now = new Date().toISOString();
     return [...this.records.values()]
-      .filter((r) => r.ownerId === ownerId && (status === undefined || r.status === status))
+      .filter((r) => r.ownerId === ownerId && matchesApprovalStatus(r, status, now))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(safeOffset, safeOffset + clampLimit(limit));
+      .slice(safeOffset, safeOffset + clampLimit(limit))
+      .map((r) => resolveApprovalRecordStatus(r, now));
   }
 
   async countByOwner(ownerId: string, status?: string): Promise<number> {
+    const now = new Date().toISOString();
     let n = 0;
     for (const r of this.records.values()) {
-      if (r.ownerId === ownerId && (status === undefined || r.status === status)) n++;
+      if (r.ownerId === ownerId && matchesApprovalStatus(r, status, now)) n++;
     }
     return n;
   }
 
   async getForOwner(id: string, ownerId: string): Promise<ApprovalRecord | null> {
     const rec = this.records.get(id);
-    return rec?.ownerId === ownerId ? rec : null;
+    if (!rec || rec.ownerId !== ownerId) return null;
+    return resolveApprovalRecordStatus(rec);
   }
 
   async update(id: string, patch: Partial<ApprovalRecord>): Promise<ApprovalRecord | null> {
@@ -348,10 +386,39 @@ export class InMemoryApprovalStore implements ApprovalStore {
 
   async updateIfStatus(id: string, expectedStatus: ApprovalStatus, patch: Partial<ApprovalRecord>): Promise<ApprovalRecord | null> {
     const existing = this.records.get(id);
-    if (!existing || existing.status !== expectedStatus) return null;
-    const updated = { ...existing, ...patch, id: existing.id, updatedAt: new Date().toISOString() };
+    if (!existing) return null;
+    const now = new Date().toISOString();
+    const effective = isApprovalRecordExpired(existing, now) ? "expired" : existing.status;
+    if (effective !== expectedStatus) return null;
+    const updated = { ...existing, ...patch, id: existing.id, updatedAt: now };
     this.records.set(id, updated);
     return updated;
+  }
+
+  async sweepExpired(
+    now = new Date().toISOString(),
+    limit = 500,
+    onSwept?: (record: ApprovalRecord) => void | Promise<void>
+  ): Promise<number> {
+    const safeLimit = clampLimit(limit);
+    let count = 0;
+    for (const [id, r] of this.records.entries()) {
+      if (r.status === "pending_approval" && r.expiresAt !== null && r.expiresAt <= now) {
+        const updated: ApprovalRecord = {
+          ...r,
+          status: "expired",
+          expiredAt: r.expiredAt ?? r.expiresAt ?? now,
+          updatedAt: now,
+        };
+        this.records.set(id, updated);
+        count++;
+        if (onSwept) {
+          await onSwept(updated);
+        }
+        if (count >= safeLimit) break;
+      }
+    }
+    return count;
   }
 }
 
@@ -379,7 +446,7 @@ export function createActivity(
   agentId: string,
   ownerId: string,
   intent: AgentIntent,
-  policyDecision: PolicyDecision,
+  policyDecision?: PolicyDecision | null,
   idempotencyKey?: string | null
 ): ActivityRecord {
   const now = new Date().toISOString();
@@ -389,7 +456,7 @@ export function createActivity(
     ownerId,
     idempotencyKey,
     intent,
-    policyDecision,
+    policyDecision: policyDecision ?? null,
     authorizationStatus: null,
     simulationResult: null,
     txHash: null,
@@ -515,6 +582,8 @@ export type { AuthorizationContext } from "./authorization.js";
 
 // Shared SQLite connection
 export {
+  EXPECTED_SCHEMA_VERSION,
+  runSchemaMigrations,
   getSharedConnection,
   getSchemaVersion,
   setSchemaVersion,

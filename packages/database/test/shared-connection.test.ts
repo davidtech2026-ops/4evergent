@@ -9,6 +9,7 @@ import {
   setSchemaVersion,
   closeSharedConnection,
   closeAllSharedConnections,
+  EXPECTED_SCHEMA_VERSION,
 } from "../src/shared-connection.js";
 import { SQLiteActivityStore } from "../src/sqlite-store.js";
 import { SQLiteAgentStore } from "../src/agent-store.js";
@@ -53,10 +54,30 @@ test("returns different instances for different dbPaths", () => {
   cleanup();
 });
 
-test("getSchemaVersion returns 5 (set by shared-connection on creation)", () => {
+test("getSchemaVersion returns the single expected version on creation", () => {
   const dir = makeTmpDir();
   const db = getSharedConnection(join(dir, "test.db"));
-  assert.equal(getSchemaVersion(db), 5);
+  assert.equal(getSchemaVersion(db), EXPECTED_SCHEMA_VERSION);
+  cleanup();
+});
+
+test("refuses an older schema instead of silently stamping it as current", () => {
+  const dir = makeTmpDir();
+  const dbPath = join(dir, "old.db");
+  const first = getSharedConnection(dbPath);
+  setSchemaVersion(first, EXPECTED_SCHEMA_VERSION - 1);
+  closeSharedConnection(dbPath);
+  assert.throws(() => getSharedConnection(dbPath), /expected 5, actual 4/);
+  cleanup();
+});
+
+test("refuses a newer schema before a store can use it", () => {
+  const dir = makeTmpDir();
+  const dbPath = join(dir, "new.db");
+  const first = getSharedConnection(dbPath);
+  setSchemaVersion(first, EXPECTED_SCHEMA_VERSION + 1);
+  closeSharedConnection(dbPath);
+  assert.throws(() => getSharedConnection(dbPath), /expected 5, actual 6/);
   cleanup();
 });
 

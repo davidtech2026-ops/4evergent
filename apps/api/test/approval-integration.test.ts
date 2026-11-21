@@ -237,7 +237,7 @@ test("approval: reject valid pending approval → 200 rejected", async () => {
     maxTxAmount: { XLM: "1000" },
     requireHumanApprovalForAmountAbove: "10",
   };
-  const { baseUrl, close, approvals } = await startServer({ policyRules: rules });
+  const { baseUrl, close, store, approvals } = await startServer({ policyRules: rules });
   try {
     const intentRes = await post(baseUrl, "/agents/test-agent/intents", {
       type: "payment",
@@ -256,6 +256,24 @@ test("approval: reject valid pending approval → 200 rejected", async () => {
     assert.ok(approval);
     assert.equal(approval!.status, "rejected");
     assert.ok(approval!.rejectedAt);
+
+    // #389: human-rejected approval records "denied_by_approver" on the activity,
+    // distinct from policy denials ("denied_by_policy").
+    const activity = await store.get(intentRes.body.activityId);
+    assert.ok(activity);
+    assert.equal(activity!.status, "rejected");
+    assert.equal(activity!.authorizationStatus, "denied_by_approver");
+
+    // Policy-denied intent still records "denied_by_policy"
+    const deniedRes = await post(baseUrl, "/agents/test-agent/intents", {
+      type: "payment",
+      asset: "XLM",
+      destination: Keypair.random().publicKey(),
+      amount: "2000",
+      reason: "policy deny check",
+    });
+    assert.equal(deniedRes.status, 403);
+    assert.equal(deniedRes.body.authorizationStatus, "denied_by_policy");
   } finally {
     await close();
   }

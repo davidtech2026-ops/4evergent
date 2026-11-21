@@ -37,7 +37,9 @@ export default function ApprovalDetail() {
       const r = await api.approvalDetail(approval.id);
       setApproval(r.approval);
     } catch (e: any) {
-      if (e.status === 409) {
+      if (e.code === 'AGENT_NOT_ACTIVE') {
+        setActionError(e.message ?? 'Agent is paused or disabled; approvals cannot be executed');
+      } else if (e.status === 409) {
         setActionError(e.message ?? 'Approval state changed; please refresh');
       } else {
         setActionError(e.message ?? 'Approve failed');
@@ -73,7 +75,8 @@ export default function ApprovalDetail() {
     <EmptyState title="Approval not found" message="This approval does not exist or you do not have access." />
   );
 
-  const isPending = approval.status === 'pending_approval';
+  const isExpired = approval.status === 'expired' || (approval.expiresAt ? new Date(approval.expiresAt) <= new Date() : false);
+  const isPending = approval.status === 'pending_approval' && !isExpired;
   const canApprove = isPending;
   const canReject = isPending;
 
@@ -90,7 +93,7 @@ export default function ApprovalDetail() {
       </div>
 
       <div className="detail-grid">
-        <DetailCard title="Status"><StatusBadge status={approval.status} /></DetailCard>
+        <DetailCard title="Status"><StatusBadge status={isExpired ? 'expired' : approval.status} /></DetailCard>
         <DetailCard title="Agent"><code>{approval.agentId}</code></DetailCard>
         <DetailCard title="Activity"><code>{approval.activityId.slice(0, 8)}</code></DetailCard>
         <DetailCard title="Intent Type">{approval.intent.type}</DetailCard>

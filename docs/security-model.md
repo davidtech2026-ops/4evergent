@@ -173,6 +173,17 @@ ApprovalRecord {
 - Caller can only approve/reject own approvals
 - Cross-owner access returns 404 (not 403) to avoid leaking existence
 
+**Sub-Resource Agent Binding:** Agent-scoped sub-resources — schedules
+(`/agents/:agentId/schedules/:scheduleId`) and activity
+(`/agents/:agentId/activity/:activityId`) — are bound to the `:agentId` path
+segment. Every handler, including single-resource reads and mutations,
+validates that the addressed resource belongs to that agent via
+`AuthorizationService`. A request addressing a resource under a different
+agent's path is rejected with `404`, indistinguishable from a nonexistent
+agent or resource id (no existence leak). Owner isolation on top is unchanged:
+a cross-owner request also returns `404`. Covered by
+`apps/api/test/agent-binding-385.test.ts`.
+
 **Development Identity:** In dev/test, identity is deterministic via `ServerOptions.requestContext: { ownerId }` — no bearer credential is required. Where browser user authentication is enabled, the session cookie resolves the principal instead (ADRs 016–017 in [architecture.md](architecture.md)); `requestContext` remains the fallback used by tests and offline tooling.
 
 **Known Limitation:** The machine-client bearer path (`API_KEYS`) is production-ready. Browser user authentication IS implemented — three providers (email+password, Stellar wallet signature, Google OAuth) issuing HttpOnly `SameSite` session cookies, see `apps/api/src/auth.ts` and ADRs 016–019 in [architecture.md](architecture.md). Its current limitations: OAuth state and Stellar challenges are in-memory (single API process, ADR-019), registration is open by default (ADR-017), and login endpoints have no rate limiting yet (ADR-020, Proposed).

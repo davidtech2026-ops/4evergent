@@ -4,6 +4,13 @@ import { InMemoryExecutionStore } from "@4evergent/database";
 import { ExecutionQueue } from "../src/execution-queue.js";
 import type { ExecutionRecord, ExecutionResult } from "@4evergent/database";
 import type { AgentIntent } from "@4evergent/shared";
+import { startServer, waitFor } from "./helpers.js";
+import { StellarAdapter } from "@4evergent/agent-core";
+import {
+  StellarTransactionBuilder,
+  StellarSimulator,
+  StellarSubmitter,
+} from "@4evergent/stellar";
 
 function makeIntent(): AgentIntent {
   return {
@@ -154,4 +161,144 @@ test("ExecutionQueue: manual execution regression — direct pipeline execution 
   const updated = await store.get(execution.id);
   assert.equal(updated?.status, "submitted");
   assert.equal(updated?.txHash, "tx-manual");
+});
+
+function stubStellar(overrides: {
+  simulate?: () => Promise<any>;
+  submit?: () => Promise<any>;
+  getTransactionStatus?: (txHash: string) => Promise<any>;
+} = {}) {
+  const originals = {
+    getAccount: StellarAdapter.prototype.getAccount,
+    getTransactionStatus: StellarAdapter.prototype.getTransactionStatus,
+    buildPayment: StellarTransactionBuilder.prototype.buildPayment,
+    simulate: StellarSimulator.prototype.simulate,
+    submit: StellarSubmitter.prototype.submit,
+  };
+  StellarAdapter.prototype.getAccount = (async () => ({
+    address: "GDI73WJ4SX7LOG3XZDJC3KCK6ED6E5NBYK2JUBQSPBCNNWEG3ZN7T75U",
+    sequence: "1",
+    balances: [],
+    subentryCount: 0,
+  })) as typeof originals.getAccount;
+  StellarAdapter.prototype.getTransactionStatus = (overrides.getTransactionStatus ?? (async () => "not_found")) as typeof originals.getTransactionStatus;
+  StellarTransactionBuilder.prototype.buildPayment = (async () => ({
+    hash: () => Buffer.from("pre-submit-hash"),
+  })) as typeof originals.buildPayment;
+  StellarSimulator.prototype.simulate = (overrides.simulate ?? (async () => ({
+    success: true,
+    fee: "100",
+    operations: 1,
+    warnings: [],
+  }))) as typeof originals.simulate;
+  StellarSubmitter.prototype.submit = (overrides.submit ?? (async () => ({
+    hash: "stub-tx-hash",
+    ledger: 123,
+  }))) as typeof originals.submit;
+  return () => {
+    StellarAdapter.prototype.getAccount = originals.getAccount;
+    StellarAdapter.prototype.getTransactionStatus = originals.getTransactionStatus;
+    StellarTransactionBuilder.prototype.buildPayment = originals.buildPayment;
+    StellarSimulator.prototype.simulate = originals.simulate;
+    StellarSubmitter.prototype.submit = originals.submit;
+  };
+}
+
+test("production pipelineExecutor: transient submission failure is classified transient and retried", async () => {
+  const restore = stubStellar({
+    submit: async () => {
+      throw new Error("network timeout");
+    },
+  });
+  const { close, executionStore } = await startServer({
+    schedulerEnabled: true,
+    intervalMs: 50,
+  });
+  try {
+    const record = makeExecution();
+    await executionStore.record(record);
+
+    const updated = await waitFor(
+      async () => {
+        const r = await executionStore.get(record.id);
+        return r && r.status !== "queued" && r.status !== "executing" ? r : undefined;
+      },
+      5000,
+      50
+    );
+    assert.ok(updated);
+    assert.equal(updated.status, "failed");
+    assert.equal(updated.errorClass, "transient");
+    assert.ok(updated.nextRetryAt);
+  } finally {
+    await close();
+    restore();
+  }
+});
+
+test("production pipelineExecutor: deterministic simulation failure is classified permanent and dead-lettered", async () => {
+  const restore = stubStellar({
+    simulate: async () => ({
+      success: false,
+      fee: "0",
+      operations: 0,
+      warnings: [],
+      error: "bad sequence",
+    }),
+  });
+  const { close, executionStore } = await startServer({
+    schedulerEnabled: true,
+    intervalMs: 50,
+  });
+  try {
+    const record = makeExecution();
+    await executionStore.record(record);
+
+    const updated = await waitFor(
+      async () => {
+        const r = await executionStore.get(record.id);
+        return r && r.status !== "queued" && r.status !== "executing" ? r : undefined;
+      },
+      5000,
+      50
+    );
+    assert.ok(updated);
+    assert.equal(updated.status, "dead_letter");
+    assert.equal(updated.errorClass, "permanent");
+    assert.equal(updated.nextRetryAt, null);
+  } finally {
+    await close();
+    restore();
+  }
+});
+
+test("production pipelineExecutor: permanent policy rejection is classified permanent and dead-lettered", async () => {
+  const restore = stubStellar();
+  const { close, executionStore } = await startServer({
+    policyRules: { maxTxAmount: { XLM: "5" } },
+    schedulerEnabled: true,
+    intervalMs: 50,
+  });
+  try {
+    const record = makeExecution({
+      intent: { ...makeIntent(), amount: "50" },
+    });
+    await executionStore.record(record);
+
+    const updated = await waitFor(
+      async () => {
+        const r = await executionStore.get(record.id);
+        return r && r.status !== "queued" && r.status !== "executing" ? r : undefined;
+      },
+      5000,
+      50
+    );
+    assert.ok(updated);
+    assert.equal(updated.status, "dead_letter");
+    assert.equal(updated.errorClass, "permanent");
+    assert.equal(updated.nextRetryAt, null);
+  } finally {
+    await close();
+    restore();
+  }
 });

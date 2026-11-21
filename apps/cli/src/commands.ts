@@ -11,6 +11,16 @@ export interface CommandArg {
   readonly name: string;
   readonly description?: string;
   readonly values?: readonly string[];
+  readonly optional?: boolean;
+}
+
+/**
+ * A documented argument layout that varies by a leading type argument, such as
+ * `intent submit <type> ...`. Rendered verbatim by the help formatter.
+ */
+export interface CommandArgVariant {
+  readonly name: string;
+  readonly usage: string;
 }
 
 export type CommandHandler = (args: string[]) => Promise<number> | number;
@@ -18,7 +28,9 @@ export type CommandHandler = (args: string[]) => Promise<number> | number;
 export interface SubcommandDef {
   readonly name: string;
   readonly description: string;
+  readonly usage?: string;
   readonly args?: readonly CommandArg[];
+  readonly variants?: readonly CommandArgVariant[];
   readonly flags?: readonly string[];
   run?: CommandHandler;
 }
@@ -193,7 +205,7 @@ export function buildCommandTree(handlers?: CommandTreeHandlers): CommandTree {
         list: {
           name: "list",
           description: "List executions across all agents",
-          args: [{ name: "limit", description: "Max executions to list" }],
+          args: [{ name: "limit", description: "Max executions to list", optional: true }],
           run: handlers ? () => handlers.execution.list() : undefined,
         },
         get: {
@@ -248,7 +260,7 @@ export function buildCommandTree(handlers?: CommandTreeHandlers): CommandTree {
           description: "List agent activity",
           args: [
             { name: "agent-id", description: "Agent ID" },
-            { name: "limit", description: "Limit (1-100, default 50)" },
+            { name: "limit", description: "Limit (1-100, default 50)", optional: true },
           ],
           run: handlers ? (args) => handlers.activity.list(args) : undefined,
         },
@@ -276,7 +288,7 @@ export function buildCommandTree(handlers?: CommandTreeHandlers): CommandTree {
           description: "List agent schedules",
           args: [
             { name: "agent-id", description: "Agent ID" },
-            { name: "limit", description: "Limit (1-100, default 50)" },
+            { name: "limit", description: "Limit (1-100, default 50)", optional: true },
           ],
           run: handlers ? (args) => handlers.schedule.list(args) : undefined,
         },
@@ -297,6 +309,7 @@ export function buildCommandTree(handlers?: CommandTreeHandlers): CommandTree {
             { name: "expression", description: "Cron expression (5 fields)" },
             { name: "type", description: "Intent type", values: INTENT_TYPES },
           ],
+          flags: ["--issuer", "--timezone"],
           run: handlers ? (args) => handlers.schedule.create(args) : undefined,
         },
         update: {
@@ -352,12 +365,14 @@ export function buildCommandTree(handlers?: CommandTreeHandlers): CommandTree {
       name: "intent",
       description: "Submit transactional intents",
       usage:
-        "Usage: 4evergent intent submit <agent-id> <type> [args...] [--idempotency-key <key>]\nTypes: payment | trustline | contract_call",
+        "Usage: 4evergent intent submit <agent-id> <type> [args...] [--issuer <G...>] [--idempotency-key <key>]\nTypes: payment | trustline | contract_call",
       reportUnknownSubcommand: false,
       subcommands: {
         submit: {
           name: "submit",
           description: "Submit an intent (payment, trustline, contract_call)",
+          usage:
+            "Usage: 4evergent intent submit <agent-id> <type> [args...] [--idempotency-key <key>] [--issuer <G...>]",
           args: [
             { name: "agent-id", description: "Agent ID" },
             {
@@ -366,7 +381,18 @@ export function buildCommandTree(handlers?: CommandTreeHandlers): CommandTree {
               values: INTENT_TYPES,
             },
           ],
-          flags: ["--idempotency-key"],
+          variants: [
+            {
+              name: "payment",
+              usage: "payment <asset> <amount> <destination> <reason> [memo] [--issuer <G...>]",
+            },
+            { name: "trustline", usage: "trustline <assetCode> <issuer> <reason> [limit]" },
+            {
+              name: "contract_call",
+              usage: "contract_call <contractId> <function> <args-json> <reason>",
+            },
+          ],
+          flags: ["--idempotency-key", "--issuer"],
           run: handlers ? (args) => handlers.intent.submit(args) : undefined,
         },
       },
@@ -405,16 +431,149 @@ export const COMMAND_TREE: CommandTree = buildCommandTree();
 export const COMMANDS_HELP = [
   "Commands:",
   "  --version, -v  Print the CLI package version",
+  "  --help, -h     Show help (also: 4evergent <command> [<subcommand>] --help)",
   "  health",
   "  agent list | get <id> | create <name> | pause <id> | resume <id> | disable <id> [--force|--yes]",
-  "  approval list | approve <id> | reject <id>",
+  "  approval list | get <id> | approve <id> | reject <id>",
   "  execution list | get <id> | retry <id> | cancel <id>",
   "  policy get <agent-id> | update <agent-id>",
   "  activity list <agent-id> [limit] | get <agent-id> <activity-id>",
-  "  schedule list <agent-id> [limit] | get <agent-id> <schedule-id> | create <agent-id> <cron> <intent> | update <agent-id> <schedule-id> <cron> | pause <agent-id> <schedule-id> | resume <agent-id> <schedule-id> | disable <agent-id> <schedule-id> | delete <agent-id> <schedule-id> [--force|--yes]",
-  "  intent submit <agent-id> <type> [args...] [--idempotency-key <key>]",
+  "  schedule list <agent-id> [limit] | get <agent-id> <schedule-id> | create <agent-id> <cron> <intent> [--issuer <G...>] [--timezone <tz>] | update <agent-id> <schedule-id> <cron> | pause <agent-id> <schedule-id> | resume <agent-id> <schedule-id> | disable <agent-id> <schedule-id> | delete <agent-id> <schedule-id> [--force|--yes]",
+  "  intent submit <agent-id> <type> [args...] [--issuer <G...>] [--idempotency-key <key>]",
   "  completion bash | zsh",
+  "",
+  "Run '4evergent <command> --help' or '4evergent <command> <subcommand> --help' for details.",
 ].join("\n");
+
+const HELP_FLAGS: readonly string[] = ["--help", "-h"];
+
+function pad(text: string, width: number): string {
+  return text.padEnd(width);
+}
+
+function formatArgUsage(arg: CommandArg): string {
+  return arg.optional ? `[<${arg.name}>]` : `<${arg.name}>`;
+}
+
+/**
+ * Builds a usage line from the declared arg/flag definitions, so a command
+ * cannot advertise arguments it does not declare (or omit ones it does).
+ */
+function buildUsage(
+  path: string,
+  def: { args?: readonly CommandArg[]; flags?: readonly string[] }
+): string {
+  const signature = [
+    (def.args ?? []).map(formatArgUsage).join(" "),
+    (def.flags ?? []).map((flag) => `[${flag}]`).join(" "),
+  ]
+    .filter((part) => part.length > 0)
+    .join(" ");
+  return `Usage: 4evergent ${path}${signature ? ` ${signature}` : ""}`;
+}
+
+function formatArgLines(args: readonly CommandArg[]): string[] {
+  const width = Math.max(...args.map((arg) => arg.name.length + 2));
+  return args.map((arg) => {
+    const notes = [
+      arg.values ? `one of: ${arg.values.join(", ")}` : "",
+      arg.optional ? "optional" : "",
+    ].filter(Boolean);
+    const suffix = notes.length > 0 ? ` (${notes.join("; ")})` : "";
+    return `  ${pad(`<${arg.name}>`, width)}  ${arg.description ?? ""}${suffix}`.trimEnd();
+  });
+}
+
+/**
+ * Help for a top-level command: its usage line plus every declared subcommand.
+ */
+export function formatCommandHelp(cmdName: string, cmdDef: CommandDef): string {
+  const lines = [`4evergent ${cmdName} — ${cmdDef.description}`, ""];
+  lines.push(cmdDef.usage ?? buildUsage(cmdName, cmdDef));
+
+  if (cmdDef.args && cmdDef.args.length > 0) {
+    lines.push("", "Arguments:", ...formatArgLines(cmdDef.args));
+  }
+  if (cmdDef.flags && cmdDef.flags.length > 0) {
+    lines.push("", `Flags: ${cmdDef.flags.join(", ")}`);
+  }
+
+  const subcommands = Object.values(cmdDef.subcommands ?? {});
+  if (subcommands.length > 0) {
+    const width = Math.max(...subcommands.map((sub) => sub.name.length));
+    lines.push("", "Subcommands:");
+    for (const sub of subcommands) {
+      lines.push(`  ${pad(sub.name, width)}  ${sub.description}`);
+    }
+    lines.push("", `Run '4evergent ${cmdName} <subcommand> --help' for arguments and flags.`);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Help for a single subcommand: usage, arguments, per-type argument order and flags.
+ */
+export function formatSubcommandHelp(
+  cmdName: string,
+  cmdDef: CommandDef,
+  subName: string,
+  subDef: SubcommandDef
+): string {
+  const lines = [`4evergent ${cmdName} ${subName} — ${subDef.description}`, ""];
+  lines.push(subDef.usage ?? buildUsage(`${cmdName} ${subName}`, subDef));
+
+  if (subDef.args && subDef.args.length > 0) {
+    lines.push("", "Arguments:", ...formatArgLines(subDef.args));
+  }
+
+  if (subDef.variants && subDef.variants.length > 0) {
+    const width = Math.max(...subDef.variants.map((variant) => variant.name.length));
+    lines.push("", "Argument order by type:");
+    for (const variant of subDef.variants) {
+      lines.push(`  ${pad(variant.name, width)}  ${variant.usage}`);
+    }
+  }
+
+  if (subDef.flags && subDef.flags.length > 0) {
+    lines.push("", `Flags: ${subDef.flags.join(", ")}`);
+  }
+
+  if (cmdDef.subcommands) {
+    lines.push("", `Run '4evergent ${cmdName} --help' for all ${cmdName} subcommands.`);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Prints help selected by the first positional tokens and returns the exit code.
+ * A help flag never reaches a handler, so it can never be read as a positional.
+ */
+function printHelp(tree: CommandTree, argv: string[], helpText: string): number {
+  const positionals = argv.filter((arg) => !HELP_FLAGS.includes(arg));
+  const [cmd, sub] = positionals;
+
+  if (!cmd || cmd === "help") {
+    console.log(`4evergent Operator CLI\n\n${helpText}`);
+    return 0;
+  }
+
+  const cmdDef = tree[cmd];
+  if (!cmdDef) {
+    console.error(`Unknown command: ${cmd}`);
+    return 1;
+  }
+
+  const subDef = sub ? cmdDef.subcommands?.[sub] : undefined;
+  if (sub && subDef) {
+    console.log(formatSubcommandHelp(cmd, cmdDef, sub, subDef));
+    return 0;
+  }
+
+  console.log(formatCommandHelp(cmd, cmdDef));
+  return 0;
+}
 
 /**
  * Dispatches a command line using the declared command tree.
@@ -431,12 +590,18 @@ export async function dispatchCommand(
   const sub = argv[1];
   const helpText = options.helpText ?? COMMANDS_HELP;
 
+  // --help/-h anywhere short-circuits: no handler runs and no usage error is
+  // reported about positionals the operator did not intend to supply.
+  if (argv.some((arg) => HELP_FLAGS.includes(arg))) {
+    return printHelp(tree, argv, helpText);
+  }
+
   if (cmd === "--version" || cmd === "-v") {
     console.log(options.version);
     return 0;
   }
 
-  if (cmd === "--help" || cmd === "-h" || cmd === "help") {
+  if (cmd === "help") {
     console.log(`4evergent Operator CLI\n\n${helpText}`);
     return 0;
   }

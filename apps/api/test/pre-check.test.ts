@@ -491,3 +491,123 @@ test("PRE-CHECK TEST 15: no secrets persisted/logged by new logic", async () => 
   assert.ok(!JSON.stringify(updated).toLowerCase().includes("private_key"));
   assert.ok(!JSON.stringify(updated).toLowerCase().includes("mnemonic"));
 });
+
+test("PRE-CHECK TEST 16: failed outcome with txHash/submittedHash persists both on stored record", async () => {
+  const store = new InMemoryExecutionStore();
+  const pipelineExecutor = async (record: ExecutionRecord): Promise<ExecutionResult> => {
+    return {
+      record,
+      success: false,
+      status: "failed",
+      error: "Horizon timeout after submission",
+      errorClass: "transient",
+      txHash: "tx-failed-persist-16",
+      submittedHash: "tx-failed-persist-16",
+    };
+  };
+  const queue = new ExecutionQueue(store, pipelineExecutor, async () => ({
+    accountId: () => "GACCOUNT",
+    sequenceNumber: () => "1",
+    incrementSequenceNumber: () => {},
+  }), {
+    retryPolicy: { maxRetries: 3, baseDelayMs: 10, maxDelayMs: 50 },
+  });
+
+  const execution = makeExecution();
+  await queue.enqueue(execution);
+  await queue.processDue();
+
+  const updated = await store.get(execution.id);
+  assert.equal(updated?.status, "failed");
+  assert.equal(updated?.txHash, "tx-failed-persist-16");
+  assert.equal(updated?.submittedHash, "tx-failed-persist-16");
+  assert.equal(updated?.attempt, 1);
+});
+
+test("PRE-CHECK TEST 17: onSubmitted persists hash immediately and survives failure after submit", async () => {
+  const store = new InMemoryExecutionStore();
+  let midExecutionRecord: ExecutionRecord | null = null;
+
+  const pipelineExecutor = async (
+    _record: ExecutionRecord,
+    context?: { onSubmitted?: (txHash?: string) => void | Promise<void> }
+  ): Promise<ExecutionResult> => {
+    await context?.onSubmitted?.("tx-onsubmitted-17");
+    // Simulate crash window check: hash is already persisted while status is still "executing"
+    midExecutionRecord = await store.get(_record.id);
+    // Then fail with an uncaught error before complete() is reached
+    throw new Error("Horizon connection reset after submit");
+  };
+
+  const preCheckCalls: string[] = [];
+  const queue = new ExecutionQueue(store, pipelineExecutor, async () => ({
+    accountId: () => "GACCOUNT",
+    sequenceNumber: () => "1",
+    incrementSequenceNumber: () => {},
+  }), {
+    preCheck: async (hash: string) => {
+      preCheckCalls.push(hash);
+      return "network_error";
+    },
+    retryPolicy: { maxRetries: 3, baseDelayMs: 10, maxDelayMs: 50 },
+  });
+
+  const execution = makeExecution();
+  await queue.enqueue(execution);
+  await queue.processDue();
+
+  // Mid-execution (before complete/fail) the hash was already persisted
+  assert.equal(midExecutionRecord?.status, "executing");
+  assert.equal(midExecutionRecord?.txHash, "tx-onsubmitted-17");
+  assert.equal(midExecutionRecord?.submittedHash, "tx-onsubmitted-17");
+
+  // After failure, the stored record keeps the hash and pre-check engaged
+  const afterFail = await store.get(execution.id);
+  assert.equal(afterFail?.status, "dead_letter");
+  assert.equal(afterFail?.txHash, "tx-onsubmitted-17");
+  assert.equal(afterFail?.submittedHash, "tx-onsubmitted-17");
+  assert.deepEqual(preCheckCalls, ["tx-onsubmitted-17"]);
+});
+
+test("PRE-CHECK TEST 18: first-attempt failure carrying a hash engages evaluateRetryWithPreCheck in fail()", async () => {
+  const store = new InMemoryExecutionStore();
+  const preCheckCalls: string[] = [];
+
+  const pipelineExecutor = async (record: ExecutionRecord): Promise<ExecutionResult> => {
+    return {
+      record,
+      success: false,
+      status: "failed",
+      error: "Horizon timeout",
+      errorClass: "transient",
+      txHash: "tx-first-attempt-18",
+      submittedHash: "tx-first-attempt-18",
+    };
+  };
+
+  const queue = new ExecutionQueue(store, pipelineExecutor, async () => ({
+    accountId: () => "GACCOUNT",
+    sequenceNumber: () => "1",
+    incrementSequenceNumber: () => {},
+  }), {
+    preCheck: async (hash: string) => {
+      preCheckCalls.push(hash);
+      return "found";
+    },
+    retryPolicy: { maxRetries: 3, baseDelayMs: 10, maxDelayMs: 50 },
+  });
+
+  // First attempt: submittedHash is null on the queued record
+  const execution = makeExecution({ attempt: 0, submittedHash: null, txHash: null });
+  await queue.enqueue(execution);
+  await queue.processDue();
+
+  // Pre-check must have been called with the first attempt's hash
+  assert.deepEqual(preCheckCalls, ["tx-first-attempt-18"]);
+  // Because pre-check returned "found", fail() must NOT schedule a blind retry
+  const afterFail = await store.get(execution.id);
+  assert.equal(afterFail?.status, "dead_letter");
+  assert.equal(afterFail?.nextRetryAt, null);
+  assert.equal(afterFail?.txHash, "tx-first-attempt-18");
+  assert.equal(afterFail?.submittedHash, "tx-first-attempt-18");
+});

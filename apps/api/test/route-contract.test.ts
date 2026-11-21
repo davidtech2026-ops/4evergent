@@ -92,7 +92,7 @@ const AGENT_ID = "contract-agent";
 const ROUTES: RouteContract[] = [
   // ---- Public routes (no principal required) ----
   { method: "GET", path: "/health/ready", auth: "public", status: 200, keys: ["status", "checks"] },
-  { method: "GET", path: "/health", auth: "public", status: 200, keys: ["status", "signerAccountId"] },
+  { method: "GET", path: "/health", auth: "public", status: 200, keys: ["status", "signerAccountId", "version", "schemaVersion"] },
   { method: "GET", path: "/auth/config", auth: "public", status: 200, keys: ["email", "google", "stellar", "registration"] },
   { method: "POST", path: "/auth/register", auth: "public", status: 201, keys: ["subject"] },
   { method: "POST", path: "/auth/login/email", auth: "public", status: 200, keys: ["subject"] },

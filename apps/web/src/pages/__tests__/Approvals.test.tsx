@@ -78,6 +78,20 @@ describe('Approvals', () => {
     });
   });
 
+  test('expired approval renders expired badge and no approve/reject buttons', async () => {
+    const expiredAppr = {
+      ...makeApproval('expired', 'agent-exp', '100'),
+      expiresAt: new Date(Date.now() - 3600_000).toISOString(),
+    };
+    mockApi.listApprovals.mockResolvedValue({ approvals: [expiredAppr] });
+    render(<MemoryRouter><Approvals /></MemoryRouter>);
+
+    const row = await screen.findByText('agent-exp').then((el) => el.closest('tr')!);
+    expect(within(row).getByText('expired')).toBeInTheDocument();
+    expect(within(row).queryByText('Approve')).not.toBeInTheDocument();
+    expect(within(row).queryByText('Reject')).not.toBeInTheDocument();
+  });
+
   test('reject button confirms before calling api.reject', async () => {
     mockApi.listApprovals.mockResolvedValue({ approvals: [makeApproval('3', 'agent-c', '5')] });
     mockApi.reject.mockResolvedValue({ approvalId: 'aprv-3', status: 'rejected', message: 'rejected', activityId: 'act-3' });

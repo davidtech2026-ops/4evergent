@@ -133,7 +133,7 @@ interface AgentRow {
  * SQLiteAgentStore — persistent AgentStore backed by SQLite.
  *
  * Uses Node.js built-in node:sqlite (Node 22+). Schema versioned in _meta
- * (schema_version = 1). initSchema() is idempotent. Records survive process
+ * (schema_version = 5). initSchema() is idempotent. Records survive process
  * restart.
  */
 export class SQLiteAgentStore implements AgentStore {

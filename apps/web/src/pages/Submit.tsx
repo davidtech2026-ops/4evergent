@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../api';
 import type { SubmitPaymentIntent } from '../types';
@@ -38,6 +38,17 @@ export default function Submit() {
   const [error, setError] = useState<string | null>(null);
   const [failure, setFailure] = useState<SubmitFailure | null>(null);
   const [result, setResult] = useState<SubmitResult | null>(null);
+  const attemptRef = useRef<{ fingerprint: string; key: string } | null>(null);
+
+  const getOrCreateIdempotencyKey = (agentId: string, intent: unknown): string => {
+    const fingerprint = JSON.stringify({ agentId, intent });
+    if (attemptRef.current && attemptRef.current.fingerprint === fingerprint) {
+      return attemptRef.current.key;
+    }
+    const key = crypto.randomUUID();
+    attemptRef.current = { fingerprint, key };
+    return key;
+  };
 
   useEffect(() => {
     // Page through GET /agents so the dropdown lists every agent, not just
@@ -68,6 +79,7 @@ export default function Submit() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
     setError(null);
     setFailure(null);
     setResult(null);
@@ -88,9 +100,11 @@ export default function Submit() {
         amount,
         reason,
       };
-      api.submitPayment(selectedAgent, intent)
+      const idempotencyKey = getOrCreateIdempotencyKey(selectedAgent, intent);
+      api.submitPayment(selectedAgent, intent, idempotencyKey)
         .then((r) => {
-          setResult({ agentId: selectedAgent, activityId: r.activityId, approvalId: r.approvalId, status: r.status });
+          attemptRef.current = null;
+          setResult({ agentId: r.agentId || selectedAgent, activityId: r.activityId, approvalId: r.approvalId, status: r.status });
         })
         .catch((e: any) => handleFailure(selectedAgent, e))
         .finally(() => setLoading(false));
@@ -98,15 +112,18 @@ export default function Submit() {
       if (!trustlineAssetCode || trustlineAssetCode.length < 1) { setLoading(false); return setError('Asset code is required'); }
       if (trustlineAssetCode === 'XLM') { setLoading(false); return setError('XLM is native — use payment instead'); }
       if (!trustlineIssuer || !trustlineIssuer.startsWith('G')) { setLoading(false); return setError('Issuer must be a valid Stellar account (G...)'); }
-      api.submitTrustline(selectedAgent, {
-        type: 'trustline',
+      const intent = {
+        type: 'trustline' as const,
         assetCode: trustlineAssetCode,
         issuer: trustlineIssuer,
         limit: trustlineLimit || undefined,
         reason,
-      })
+      };
+      const idempotencyKey = getOrCreateIdempotencyKey(selectedAgent, intent);
+      api.submitTrustline(selectedAgent, intent, idempotencyKey)
         .then((r) => {
-          setResult({ agentId: selectedAgent, activityId: r.activityId, approvalId: r.approvalId, status: r.status });
+          attemptRef.current = null;
+          setResult({ agentId: r.agentId || selectedAgent, activityId: r.activityId, approvalId: r.approvalId, status: r.status });
         })
         .catch((e: any) => handleFailure(selectedAgent, e))
         .finally(() => setLoading(false));
@@ -178,7 +195,7 @@ export default function Submit() {
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="surface" style={{ maxWidth: 'var(--form-max-width)' }}>
+      <form onSubmit={handleSubmit} onReset={() => { attemptRef.current = null; }} className="surface" style={{ maxWidth: '500px' }}>
         <div className="field">
           <label htmlFor="intent-type">Intent Type</label>
           <select id="intent-type" value={intentType} onChange={(e) => setIntentType(e.target.value as any)} className="select">

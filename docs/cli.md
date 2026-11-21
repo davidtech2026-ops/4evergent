@@ -62,7 +62,7 @@ is optional when the API is running in development authentication mode.
 4evergent activity get <agent-id> <activity-id>  Show activity detail
 4evergent schedule list <agent-id> [limit]  List agent schedules (limit 1-100, default 50)
 4evergent schedule get <agent-id> <sch-id>  Show schedule detail
-4evergent intent submit <agent-id> <type> [args...] [--idempotency-key <key>]
+4evergent intent submit <agent-id> <type> [args...] [--issuer <G...>] [--idempotency-key <key>]
                                             Submit an intent (see Intent types below)
 4evergent completion <bash|zsh>             Generate shell completion script
 ```
@@ -120,10 +120,15 @@ mkdir -p ~/.zfunc
 Supported intent types (accepted by the transaction pipeline):
 
 ```
-payment       <asset> <amount> <destination> <reason> [memo]
+payment       <asset> <amount> <destination> <reason> [memo] [--issuer <G...>]
 trustline     <assetCode> <issuer> <reason> [limit]
 contract_call <contractId> <function> <args-json-array> <reason>
 ```
+
+For non-native (`!= XLM`) payment assets such as `USDC`, `--issuer <G...>` is
+required and must be a valid 56-character Stellar address; the CLI sends it as
+`assetDetails: { code, issuer }` for both `intent submit` and `schedule create`.
+Native `XLM` payments do not take `--issuer` and never include `assetDetails`.
 
 `account_settings` is NOT supported by the transaction pipeline and is
 rejected by the CLI.
@@ -187,6 +192,7 @@ CLI does not retry automatically — retry manually, using the SAME
 4evergent schedule get agent-123 sch-123
 4evergent intent submit agent-123 payment XLM 25 GDAAAA... "weekly payout"
 4evergent intent submit agent-123 payment XLM 25 GDAAAA... "weekly payout" --idempotency-key weekly-42
+4evergent intent submit agent-123 payment USDC 25 GDAAAA... "weekly payout" --issuer GDI73W...
 4evergent intent submit agent-123 trustline USDC GDAAAA... "add USDC trustline" 1000
 4evergent intent submit agent-123 contract_call CABCD... transfer '["arg1","arg2"]' "transfer funds"
 ```

@@ -23,7 +23,7 @@ import type {
  * database server required. Data persists across process restarts in a file
  * at the path provided to the constructor.
  *
- * Schema is versioned in _meta (schema_version = 3). initSchema() is
+ * Schema is versioned in _meta (schema_version = 5). initSchema() is
  * idempotent and safe to call on every construction.
  */
 export class SQLiteActivityStore implements ActivityStore {
@@ -103,7 +103,7 @@ export class SQLiteActivityStore implements ActivityStore {
         owner_id: record.ownerId,
         idempotency_key: record.idempotencyKey ?? null,
         intent_json: JSON.stringify(record.intent),
-        policy_decision_json: JSON.stringify(record.policyDecision),
+        policy_decision_json: JSON.stringify(record.policyDecision ?? null),
         authorization_status: record.authorizationStatus,
         simulation_result_json: record.simulationResult
           ? JSON.stringify(record.simulationResult)
@@ -467,24 +467,25 @@ export class SQLiteApprovalStore implements ApprovalStore {
 
   async listByAgent(agentId: string, limit = 50, offset = 0, status?: string): Promise<ApprovalRecord[]> {
     const safeOffset = clampOffset(offset);
-    if (status === undefined) {
-      const rows = this.db
-        .prepare("SELECT * FROM approvals WHERE agent_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?")
-        .all(agentId, clampLimit(limit), safeOffset);
-      return rows.map((r) => rowToApprovalRecord(r as unknown as ApprovalRow));
-    }
+    const safeLimit = clampLimit(limit);
+    const filter = approvalStatusFilterClause(status);
+    const where = filter.sql ? `WHERE agent_id = ? AND ${filter.sql}` : `WHERE agent_id = ?`;
+    const params = [agentId, ...filter.params, safeLimit, safeOffset];
     const rows = this.db
-      .prepare("SELECT * FROM approvals WHERE agent_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?")
-      .all(agentId, status, clampLimit(limit), safeOffset);
+      .prepare(`SELECT * FROM approvals ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+      .all(...params);
     return rows.map((r) => rowToApprovalRecord(r as unknown as ApprovalRow));
   }
 
   async listByStatus(agentId: string, status: string, limit = 50, offset = 0): Promise<ApprovalRecord[]> {
+    const safeOffset = clampOffset(offset);
+    const safeLimit = clampLimit(limit);
+    const filter = approvalStatusFilterClause(status);
+    const where = filter.sql ? `WHERE agent_id = ? AND ${filter.sql}` : `WHERE agent_id = ?`;
+    const params = [agentId, ...filter.params, safeLimit, safeOffset];
     const rows = this.db
-      .prepare(
-        "SELECT * FROM approvals WHERE agent_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
-      )
-      .all(agentId, status, clampLimit(limit), clampOffset(offset));
+      .prepare(`SELECT * FROM approvals ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+      .all(...params);
     return rows.map((r) => rowToApprovalRecord(r as unknown as ApprovalRow));
   }
 
@@ -497,27 +498,23 @@ export class SQLiteApprovalStore implements ApprovalStore {
 
   async listByOwner(ownerId: string, limit = 50, offset = 0, status?: string): Promise<ApprovalRecord[]> {
     const safeOffset = clampOffset(offset);
-    if (status === undefined) {
-      const rows = this.db
-        .prepare("SELECT * FROM approvals WHERE owner_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?")
-        .all(ownerId, clampLimit(limit), safeOffset);
-      return rows.map((r) => rowToApprovalRecord(r as unknown as ApprovalRow));
-    }
+    const safeLimit = clampLimit(limit);
+    const filter = approvalStatusFilterClause(status);
+    const where = filter.sql ? `WHERE owner_id = ? AND ${filter.sql}` : `WHERE owner_id = ?`;
+    const params = [ownerId, ...filter.params, safeLimit, safeOffset];
     const rows = this.db
-      .prepare("SELECT * FROM approvals WHERE owner_id = ? AND status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?")
-      .all(ownerId, status, clampLimit(limit), safeOffset);
+      .prepare(`SELECT * FROM approvals ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`)
+      .all(...params);
     return rows.map((r) => rowToApprovalRecord(r as unknown as ApprovalRow));
   }
 
   async countByOwner(ownerId: string, status?: string): Promise<number> {
-    const row =
-      status === undefined
-        ? this.db
-            .prepare("SELECT COUNT(*) AS count FROM approvals WHERE owner_id = ?")
-            .get(ownerId)
-        : this.db
-            .prepare("SELECT COUNT(*) AS count FROM approvals WHERE owner_id = ? AND status = ?")
-            .get(ownerId, status);
+    const filter = approvalStatusFilterClause(status);
+    const where = filter.sql ? `WHERE owner_id = ? AND ${filter.sql}` : `WHERE owner_id = ?`;
+    const params = [ownerId, ...filter.params];
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS count FROM approvals ${where}`)
+      .get(...params);
     return Number((row as unknown as { count: number | bigint }).count);
   }
 
@@ -537,11 +534,13 @@ export class SQLiteApprovalStore implements ApprovalStore {
   }
 
   async updateIfStatus(id: string, expectedStatus: ApprovalStatus, patch: Partial<ApprovalRecord>): Promise<ApprovalRecord | null> {
+    const now = new Date().toISOString();
+    const expiryGuard = expectedStatus === "pending_approval" ? "AND (expires_at IS NULL OR expires_at > @p_now)" : "";
     const partial = buildApprovalPartialUpdate(patch);
     if (!partial) {
       const row = this.db
-        .prepare("SELECT * FROM approvals WHERE id = ? AND status = ?")
-        .get(id, expectedStatus) as unknown as ApprovalRow | undefined;
+        .prepare(`SELECT * FROM approvals WHERE id = ? AND status = ? ${expectedStatus === "pending_approval" ? "AND (expires_at IS NULL OR expires_at > ?)" : ""}`)
+        .get(...(expectedStatus === "pending_approval" ? [id, expectedStatus, now] : [id, expectedStatus])) as unknown as ApprovalRow | undefined;
       return row ? rowToApprovalRecord(row) : null;
     }
 
@@ -550,12 +549,58 @@ export class SQLiteApprovalStore implements ApprovalStore {
     // claimer can win and no other column is overwritten. (Same rationale as
     // SQLiteExecutionStore.updateIfStatus; see execution-store.ts.)
     // updated_at is always refreshed, matching InMemoryApprovalStore.
+    const runParams: Record<string, any> = {
+      ...partial.params,
+      p_updated_at: now,
+      id,
+      expected_status: expectedStatus,
+    };
+    if (expectedStatus === "pending_approval") {
+      runParams.p_now = now;
+    }
     const result = this.db
-      .prepare(`UPDATE approvals SET ${partial.sql}, updated_at = @p_updated_at WHERE id = @id AND status = @expected_status`)
-      .run({ ...partial.params, p_updated_at: new Date().toISOString(), id, expected_status: expectedStatus });
+      .prepare(`UPDATE approvals SET ${partial.sql}, updated_at = @p_updated_at WHERE id = @id AND status = @expected_status ${expiryGuard}`)
+      .run(runParams);
     if (Number(result.changes) === 0) return null;
 
     return this.get(id);
+  }
+
+  async sweepExpired(
+    now = new Date().toISOString(),
+    limit = 500,
+    onSwept?: (record: ApprovalRecord) => void | Promise<void>
+  ): Promise<number> {
+    const safeLimit = clampLimit(limit);
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM approvals WHERE status = 'pending_approval' AND expires_at IS NOT NULL AND expires_at <= ? LIMIT ?"
+      )
+      .all(now, safeLimit) as unknown as ApprovalRow[];
+
+    if (rows.length === 0) return 0;
+
+    const ids = rows.map((r) => r.id);
+    const placeholders = ids.map(() => "?").join(",");
+    this.db
+      .prepare(
+        `UPDATE approvals SET status = 'expired', expired_at = COALESCE(expired_at, ?), updated_at = ? WHERE id IN (${placeholders})`
+      )
+      .run(now, now, ...ids);
+
+    if (onSwept) {
+      for (const row of rows) {
+        const record = rowToApprovalRecord({
+          ...row,
+          status: "expired",
+          expired_at: row.expired_at ?? now,
+          updated_at: now,
+        });
+        await onSwept(record);
+      }
+    }
+
+    return rows.length;
   }
 
   close(): void {
@@ -621,7 +666,7 @@ interface ActivityRow {
   owner_id: string;
   idempotency_key: string | null;
   intent_json: string;
-  policy_decision_json: string;
+  policy_decision_json: string | null;
   authorization_status: string | null;
   simulation_result_json: string | null;
   tx_hash: string | null;
@@ -658,7 +703,9 @@ function rowToActivityRecord(row: ActivityRow): ActivityRecord {
     ownerId: row.owner_id,
     idempotencyKey: row.idempotency_key,
     intent: JSON.parse(row.intent_json) as AgentIntent,
-    policyDecision: JSON.parse(row.policy_decision_json) as PolicyDecision,
+    policyDecision: row.policy_decision_json && row.policy_decision_json !== "null"
+      ? (JSON.parse(row.policy_decision_json) as PolicyDecision)
+      : null,
     authorizationStatus: row.authorization_status as AuthorizationStatus | null,
     simulationResult: row.simulation_result_json
       ? (JSON.parse(row.simulation_result_json) as SimulationResult)
@@ -671,7 +718,32 @@ function rowToActivityRecord(row: ActivityRow): ActivityRecord {
   };
 }
 
+function approvalStatusFilterClause(status: string | undefined): { sql: string; params: (string | number)[] } {
+  if (status === undefined) {
+    return { sql: "", params: [] };
+  }
+  const now = new Date().toISOString();
+  if (status === "pending_approval") {
+    return {
+      sql: "status = 'pending_approval' AND (expires_at IS NULL OR expires_at > ?)",
+      params: [now],
+    };
+  }
+  if (status === "expired") {
+    return {
+      sql: "(status = 'expired' OR (status = 'pending_approval' AND expires_at IS NOT NULL AND expires_at <= ?))",
+      params: [now],
+    };
+  }
+  return {
+    sql: "status = ?",
+    params: [status],
+  };
+}
+
 function rowToApprovalRecord(row: ApprovalRow): ApprovalRecord {
+  const now = new Date().toISOString();
+  const isExp = row.status === "pending_approval" && row.expires_at !== null && row.expires_at <= now;
   return {
     id: row.id,
     activityId: row.activity_id,
@@ -679,11 +751,11 @@ function rowToApprovalRecord(row: ApprovalRow): ApprovalRecord {
     ownerId: row.owner_id,
     intent: JSON.parse(row.intent_json) as AgentIntent,
     policyDecision: JSON.parse(row.policy_decision_json) as PolicyDecision,
-    status: row.status as ApprovalStatus,
+    status: isExp ? "expired" : (row.status as ApprovalStatus),
     requestedAt: row.requested_at,
     approvedAt: row.approved_at,
     rejectedAt: row.rejected_at,
-    expiredAt: row.expired_at,
+    expiredAt: isExp ? (row.expired_at ?? row.expires_at) : row.expired_at,
     approver: row.approver,
     expiresAt: row.expires_at,
     txHash: row.tx_hash,

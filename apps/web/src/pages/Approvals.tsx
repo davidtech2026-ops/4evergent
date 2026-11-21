@@ -86,12 +86,20 @@ export default function Approvals() {
                 <td>{a.intent.asset || ''}</td>
                 <td>{a.expiresAt ? new Date(a.expiresAt).toLocaleString() : 'no expiry'}</td>
                 <td>
-                  <div style={{ display: 'flex', gap: 'var(--space-xs)' }}>
-                    <button className="btn btn-primary btn-sm" disabled={loadingId === a.id} onClick={() => handleAction(a.id, 'approve')}>
-                      {loadingId === a.id ? 'Processing...' : 'Approve'}
-                    </button>
-                    <button className="btn btn-danger btn-sm" disabled={loadingId === a.id} onClick={() => setRejectId(a.id)}>Reject</button>
-                  </div>
+                  {(() => {
+                    const isExpired = a.status === 'expired' || (a.expiresAt ? new Date(a.expiresAt) <= new Date() : false);
+                    if (isExpired) {
+                      return <span className="badge badge-err">expired</span>;
+                    }
+                    return (
+                      <div style={{ display: 'flex', gap: 'var(--space-xs)' }}>
+                        <button className="btn btn-primary btn-sm" disabled={loadingId === a.id} onClick={() => handleAction(a.id, 'approve')}>
+                          {loadingId === a.id ? 'Processing...' : 'Approve'}
+                        </button>
+                        <button className="btn btn-danger btn-sm" disabled={loadingId === a.id} onClick={() => setRejectId(a.id)}>Reject</button>
+                      </div>
+                    );
+                  })()}
                 </td>
               </tr>
             ))}

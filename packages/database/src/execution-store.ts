@@ -240,7 +240,7 @@ interface ExecutionRow {
  * SQLiteExecutionStore — persistent ExecutionStore backed by SQLite.
  *
  * Uses Node.js built-in node:sqlite (Node 22+). Schema versioned in _meta
- * (version 1). initSchema() is idempotent. Records survive process restart.
+ * (version 5). initSchema() is idempotent. Records survive process restart.
  */
 export class SQLiteExecutionStore implements ExecutionStore {
   private db: DatabaseSync;

@@ -31,9 +31,10 @@
  *     traffic on a public interface by accident.
  */
 
-import { createApiServer } from "./index.js";
+import { createApiServer, API_VERSION } from "./index.js";
 import { TestnetLocalSigner, TESTNET_HORIZON_URL } from "@4evergent/stellar";
 import { DevAuthProvider, ProductionApiKeyAuthProvider } from "@4evergent/shared";
+import { getSharedConnection, getSchemaVersion } from "@4evergent/database";
 import { createAuthModule } from "./auth.js";
 
 const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
@@ -366,11 +367,15 @@ async function main() {
     );
   }
 
+  const schemaVersion = dbPath ? getSchemaVersion(getSharedConnection(dbPath)) : null;
+
   console.log(`[4evergent] Starting API server on ${host}:${port}`);
+  console.log(`[4evergent] Version: ${API_VERSION}`);
   console.log(`[4evergent] Horizon: ${horizonUrl}`);
   console.log(`[4evergent] Network: Testnet`);
   console.log(`[4evergent] Signer: ${signer.getAccountId().slice(0, 12)}...`);
   console.log(`[4evergent] Database: ${dbPath ?? "in-memory"}`);
+  console.log(`[4evergent] Schema version: ${schemaVersion ?? "none (in-memory)"}`);
   console.log(`[4evergent] Live submission: ${process.env.LIVE_SUBMIT === "1" ? "ENABLED" : "disabled"}`);
 
   let server: Awaited<ReturnType<typeof createApiServer>> | null = null;

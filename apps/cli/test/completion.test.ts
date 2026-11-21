@@ -309,6 +309,7 @@ test("CLI: 4evergent completion bash prints working bash script", () => {
   for (const shell of SUPPORTED_SHELLS) {
     assert.ok(r.stdout.includes(shell), `Bash script must include shell '${shell}'`);
   }
+  assert.ok(r.stdout.includes("--issuer"), "Bash script must include --issuer flag");
 });
 
 test("CLI: 4evergent completion zsh prints working zsh script", () => {
@@ -340,6 +341,7 @@ test("CLI: 4evergent completion zsh prints working zsh script", () => {
   for (const shell of SUPPORTED_SHELLS) {
     assert.ok(r.stdout.includes(shell), `Zsh script must include shell '${shell}'`);
   }
+  assert.ok(r.stdout.includes("--issuer"), "Zsh script must include --issuer flag");
 });
 
 test("CLI: completion script output matches generator functions directly", () => {

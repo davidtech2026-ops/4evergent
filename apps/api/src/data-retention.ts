@@ -1,18 +1,21 @@
-import type { ActivityStore } from "@4evergent/database";
+import type { ActivityStore, ApprovalRecord, ApprovalStore } from "@4evergent/database";
 import type { AuthModule } from "./auth.js";
 
 export interface DataRetentionOptions {
   store: Pick<ActivityStore, "sweepDailySpending">;
+  approvalStore?: Pick<ApprovalStore, "sweepExpired"> | null;
   authModule?: Pick<AuthModule, "sweepExpiredSessions"> | null;
   now?: number;
   authSessionDays?: number;
   dailySpendingDays?: number;
   batchSize?: number;
+  onApprovalExpired?: (approval: ApprovalRecord) => void | Promise<void>;
 }
 
 export interface DataRetentionResult {
   authSessionsRemoved: number;
   dailySpendingRemoved: number;
+  expiredApprovalsSwept: number;
 }
 
 /** One bounded sweep. A zero-day window disables cleanup for that table. */
@@ -38,6 +41,9 @@ export async function sweepRetainedData(options: DataRetentionOptions): Promise<
   const dailySpendingRemoved = spendingDays > 0
     ? await options.store.sweepDailySpending(spendingCutoff, batchSize)
     : 0;
+  const expiredApprovalsSwept = options.approvalStore
+    ? await options.approvalStore.sweepExpired(new Date(now).toISOString(), batchSize, options.onApprovalExpired)
+    : 0;
 
-  return { authSessionsRemoved, dailySpendingRemoved };
+  return { authSessionsRemoved, dailySpendingRemoved, expiredApprovalsSwept };
 }

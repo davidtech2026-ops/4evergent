@@ -483,6 +483,12 @@ function formatSchedule(s: any) {
 `;
 }
 
+const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
+
+function isValidStellarAddress(value: string): boolean {
+  return STELLAR_ADDRESS_RE.test(value);
+}
+
 /**
  * Build a typed intent object from CLI args.
  * Mirrors the AgentIntent union consumed by POST /agents/:id/intents.
@@ -495,14 +501,71 @@ function buildIntentArgs(args: string[]): { intent: any; error?: string } {
 
   switch (type) {
     case "payment": {
-      const [, asset, amount, destination, reason, memo] = args;
-      if (!asset || !amount || !destination || !reason) {
-        return { intent: null, error: "payment requires: <asset> <amount> <destination> <reason> [memo]" };
+      let issuer: string | undefined;
+      const positional: string[] = [];
+      for (let i = 1; i < args.length; i++) {
+        const arg = args[i]!;
+        if (arg === "--issuer") {
+          const val = args[i + 1];
+          if (!val || val.startsWith("--")) {
+            return { intent: null, error: "--issuer requires a Stellar address (G...)" };
+          }
+          issuer = val;
+          i++;
+        } else if (arg.startsWith("--issuer=")) {
+          const val = arg.slice("--issuer=".length);
+          if (!val) {
+            return { intent: null, error: "--issuer requires a Stellar address (G...)" };
+          }
+          issuer = val;
+        } else {
+          positional.push(arg);
+        }
       }
+
+      const [asset, amount, destination, reason, memo] = positional;
+      if (!asset || !amount || !destination || !reason) {
+        return {
+          intent: null,
+          error: "payment requires: <asset> <amount> <destination> <reason> [memo] [--issuer <G...>]",
+        };
+      }
+
+      if (asset === "XLM") {
+        if (issuer !== undefined) {
+          return { intent: null, error: "--issuer is not valid for native XLM payments" };
+        }
+        return {
+          intent: {
+            type: "payment",
+            asset,
+            destination,
+            amount,
+            reason,
+            ...(memo ? { memo } : {}),
+          },
+        };
+      }
+
+      if (!issuer) {
+        return {
+          intent: null,
+          error: `non-native asset '${asset}' requires an issuer (--issuer <G...>)`,
+        };
+      }
+
+      if (!isValidStellarAddress(issuer)) {
+        return {
+          intent: null,
+          error: `invalid --issuer '${issuer}': must be a valid Stellar address (56-character G... address)`,
+        };
+      }
+
       return {
         intent: {
           type: "payment",
           asset,
+          assetDetails: { code: asset, issuer },
           destination,
           amount,
           reason,
@@ -661,7 +724,7 @@ async function cmdScheduleGet(agentId: string, scheduleId: string) {
 
 async function cmdIntentSubmit(agentId: string, args: string[], idempotencyKey: string | null) {
   if (!agentId) {
-    console.error("Usage: 4evergent intent submit <agent-id> <type> [args...] [--idempotency-key <key>]");
+    console.error("Usage: 4evergent intent submit <agent-id> <type> [args...] [--issuer <G...>] [--idempotency-key <key>]");
     console.error("Types: payment | trustline | contract_call");
     return 1;
   }
@@ -671,7 +734,7 @@ async function cmdIntentSubmit(agentId: string, args: string[], idempotencyKey: 
   const flagIdx = args.indexOf("--idempotency-key");
   if (flagIdx !== -1) {
     key = args[flagIdx + 1] ?? null;
-    args = args.slice(0, flagIdx);
+    args = [...args.slice(0, flagIdx), ...args.slice(flagIdx + 2)];
   }
 
   const { intent, error } = buildIntentArgs(args);
@@ -755,9 +818,22 @@ async function cmdAgentCreate(args: string[]) {
   }
 }
 
+const RECOGNIZED_POLICY_FIELDS = [
+  "maxTxAmount",
+  "dailySpendingLimit",
+  "allowedAssets",
+  "allowedDestinations",
+  "allowedContractIds",
+  "txTypeRestrictions",
+  "approvalThreshold",
+  "requireHumanApprovalForAmountAbove",
+] as const;
+
 async function cmdPolicyUpdate(agentId: string, args: string[]) {
   if (!agentId) {
     console.error("Usage: 4evergent policy update <agent-id> --rules '<json>'");
+    console.error(`  --rules must be a JSON object with at least one policy field: ${RECOGNIZED_POLICY_FIELDS.join(", ")}`);
+    console.error("  Note: pass the inner 'policy' object, not the 'policy get' envelope ({ agentId, policy, version, updatedAt }).");
     return 1;
   }
   const idx = args.indexOf("--rules");
@@ -773,13 +849,34 @@ async function cmdPolicyUpdate(agentId: string, args: string[]) {
     return 1;
   }
 
+  if (typeof policy !== "object" || policy === null || Array.isArray(policy)) {
+    console.error(`Error: --rules must be a JSON object containing at least one recognized policy field (${RECOGNIZED_POLICY_FIELDS.join(", ")})`);
+    return 1;
+  }
+
+  const hasRecognizedField = RECOGNIZED_POLICY_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(policy, field));
+  if (!hasRecognizedField) {
+    if (typeof policy.policy === "object" && policy.policy !== null && !Array.isArray(policy.policy)) {
+      console.error(
+        "Error: --rules appears to be a 'policy get' envelope ({ agentId, policy, version, updatedAt }). " +
+          "Pass the inner 'policy' object instead."
+      );
+      return 1;
+    }
+    console.error(
+      `Error: --rules contains no recognized policy fields. ` +
+        `Expected at least one of: ${RECOGNIZED_POLICY_FIELDS.join(", ")}`
+    );
+    return 1;
+  }
+
   try {
     const { body } = await request(`/agents/${encodeURIComponent(agentId)}/policy`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(policy),
     });
-    console.log(`Policy updated:\n  Agent: ${body.agentId}\n  Version: ${body.version}`);
+    console.log(`Policy updated:\n${formatPolicy(body)}`);
     return 0;
   } catch (err: any) {
     console.error(`Error: ${err.message}`);
@@ -789,7 +886,7 @@ async function cmdPolicyUpdate(agentId: string, args: string[]) {
 
 async function cmdScheduleCreate(agentId: string, args: string[]) {
   if (!agentId || args.length < 2) {
-    console.error("Usage: 4evergent schedule create <agent-id> <cron-expression> <intent-type> [intent-args...] [--timezone UTC]");
+    console.error("Usage: 4evergent schedule create <agent-id> <cron-expression> <intent-type> [intent-args...] [--issuer <G...>] [--timezone UTC]");
     return 1;
   }
   const expression = args[0];

@@ -1,12 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { InMemoryActivityStore } from "@4evergent/database";
+import { InMemoryActivityStore, closeSharedConnection, getSchemaVersion, getSharedConnection } from "@4evergent/database";
 import type { Signer } from "@4evergent/stellar";
 import { createApiServer, type ServerOptions } from "../src/index.js";
+
+const expectedApiVersion: string = (
+  JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }
+).version;
 
 const horizonOk: typeof fetch = async () => new Response(JSON.stringify({
   network_passphrase: "Test SDF Network ; September 2015",
@@ -47,7 +51,12 @@ test("readiness: Horizon failure returns 503 without leaking errors; liveness st
   try {
     const live = await get("/health");
     assert.equal(live.status, 200);
-    assert.deepEqual(await live.json(), { status: "ok", signerAccountId: signer.getAccountId() });
+    assert.deepEqual(await live.json(), {
+      status: "ok",
+      signerAccountId: signer.getAccountId(),
+      version: expectedApiVersion,
+      schemaVersion: null,
+    });
     assert.equal(calls, 0);
     const ready = await get();
     assert.equal(ready.status, 503);
@@ -159,10 +168,53 @@ test("readiness: enabled workers report live status even while dependencies are 
 
 test("readiness: actual SQLite stores pass the read probe", async () => {
   const dir = mkdtempSync(join(tmpdir(), "readiness-"));
-  const { api, get } = await start({ dbPath: join(dir, "test.sqlite") });
+  const dbPath = join(dir, "test.sqlite");
+  const { api, get } = await start({ dbPath });
   try {
     const res = await get();
     assert.equal(res.status, 200);
     assert.equal(((await res.json()) as any).checks.database, "ok");
-  } finally { await api.close(); rmSync(dir, { recursive: true, force: true }); }
+  } finally {
+    await api.close();
+    closeSharedConnection(dbPath);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("health: in-memory server reports package version and null schemaVersion", async () => {
+  const { api, get } = await start();
+  try {
+    const res = await get("/health");
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), {
+      status: "ok",
+      signerAccountId: signer.getAccountId(),
+      version: expectedApiVersion,
+      schemaVersion: null,
+    });
+  } finally {
+    await api.close();
+  }
+});
+
+test("health: file-backed SQLite server reports package version and live _meta.schema_version", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "health-version-"));
+  const dbPath = join(dir, "test.sqlite");
+  const { api, get } = await start({ dbPath });
+  try {
+    const expectedSchemaVersion = getSchemaVersion(getSharedConnection(dbPath));
+    assert.equal(typeof expectedSchemaVersion, "number");
+    const res = await get("/health");
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), {
+      status: "ok",
+      signerAccountId: signer.getAccountId(),
+      version: expectedApiVersion,
+      schemaVersion: expectedSchemaVersion,
+    });
+  } finally {
+    await api.close();
+    closeSharedConnection(dbPath);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
