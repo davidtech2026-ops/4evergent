@@ -13,6 +13,7 @@
   --color-text: #e0e0e8;
   --color-text-dim: #8888a0;
   --color-text-muted: #6a6a80;
+  --color-auth-wallet-text: #eaf6ff;
 
   /* Accent (Primary Action) */
   --color-accent: #00d4ff;
@@ -52,16 +53,15 @@
   --radius-sm: 6px;
   --radius-lg: 12px;
 
-  /* Spacing scale
-     Two half-steps are added for values the UI already uses between the
-     t-shirt steps, so button / auth-control padding stays pixel-accurate
-     instead of snapping to a neighbour (#309). */
+  /* Spacing scale */
   --space-3xs: 2px;
   --space-2xs: 4px;
   --space-2xs-plus: 6px;   /* halfway between --space-2xs (4px) and --space-xs (8px) */
   --space-xs: 8px;
   --space-xs-plus: 10px;  /* halfway between --space-xs (8px) and --space-sm (12px) */
   --space-sm: 12px;
+  --auth-provider-padding-y: 11px;
+  --identity-area-padding-y: 5px;
   --space-md: 16px;
   --space-lg: 24px;
   --space-xl: 32px;
@@ -698,7 +698,7 @@ code.copyable:hover { text-decoration: underline; }
   gap: var(--space-xs-plus);
   width: 100%;
   min-height: 46px;
-  padding: var(--space-sm) var(--space-md);
+  padding: var(--auth-provider-padding-y) var(--space-md);
   border-radius: var(--radius-sm);
   font-size: var(--text-sm);
   font-weight: 600;
@@ -734,7 +734,7 @@ code.copyable:hover { text-decoration: underline; }
 .auth-provider-wallet {
   background: linear-gradient(180deg, rgba(0, 132, 255, 0.14), rgba(0, 60, 130, 0.16));
   border: 1px solid var(--color-accent-a35);
-  color: var(--color-text);
+  color: var(--color-auth-wallet-text);
 }
 
 .auth-provider-wallet:hover:not(:disabled) {
@@ -877,7 +877,7 @@ code.copyable:hover { text-decoration: underline; }
   align-items: center;
   gap: var(--space-xs);
   min-width: 0;
-  padding: var(--space-2xs) var(--space-xs-plus);
+  padding: var(--identity-area-padding-y) var(--space-xs-plus);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-surface-elev);
